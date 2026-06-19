@@ -1,0 +1,10 @@
+{
+  "id": "in-file-nav-history",
+  "name": "In-File Navigation History",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Back/forward through cursor + scroll positions, including jumps within a single file via internal links.",
+  "author": "Beau Rancourt",
+  "authorUrl": "https://github.com/beaurancourt",
+  "isDesktopOnly": false
+}
