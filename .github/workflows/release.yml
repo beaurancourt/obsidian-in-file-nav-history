@@ -1,0 +1,44 @@
+name: Release
+
+# Cut a release whenever a version tag is pushed (e.g. `1.0.0`, no `v` prefix).
+# Generates GitHub build-provenance attestations for the release assets so the
+# Obsidian community directory can cryptographically verify they were produced
+# from this repository.
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write       # create the release and upload assets
+  id-token: write       # OIDC token used to sign the attestation
+  attestations: write   # store the attestation
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # No build step: this plugin's source is shipped directly as main.js.
+
+      - name: Generate artifact attestations
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" main.js manifest.json --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes "Release $TAG" \
+              main.js manifest.json
+          fi
