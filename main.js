@@ -10,6 +10,13 @@ const JUMP_SETTLE_MS = 80;
 // Clicks that count as navigation intent (vs. just placing the cursor):
 // internal links (reading + live preview) and outline / tree items.
 const NAV_CLICK_SELECTOR = '.internal-link, a.internal-link, .cm-hmd-internal-link, .tree-item-self';
+// Search inputs whose focus means the user is about to jump: editor find
+// (Cmd+F), quick switcher / command palette / heading search, and the global
+// search panel. Focusing one anchors the pre-search position.
+const SEARCH_INPUT_SELECTOR = '.document-search-input, .cm-search input, .prompt-input, .search-input-container input';
+// After a search input blurs, keep the anchor this long so a result-click jump
+// (which blurs the input before its position change registers) still consumes it.
+const SEARCH_ANCHOR_GRACE_MS = 250;
 
 module.exports = class InFileNavHistory extends Plugin {
   async onload() {
@@ -26,6 +33,11 @@ module.exports = class InFileNavHistory extends Plugin {
     // Suppresses recording while we are programmatically navigating.
     this.navigating = false;
     this._saveTimer = null;
+    // Position to record when a search drives the editor somewhere new:
+    // { leafId, entry }. Captured when a search input gains focus, consumed
+    // (once) the first time the editor's position actually changes.
+    this.searchAnchor = null;
+    this._searchClearTimer = null;
 
     const data = await this.loadData();
     if (data && data.history) this.history = data.history;
@@ -44,6 +56,12 @@ module.exports = class InFileNavHistory extends Plugin {
     // Same-file jumps (heading/block links, outline clicks) don't change the
     // path, so catch the originating position before the jump.
     this.registerDomEvent(document, 'click', (evt) => this.onNavClick(evt), true);
+
+    // Search jumps (editor find, switcher, search panel): anchor where the
+    // editor was when the search input takes focus, so we can record the
+    // pre-search position rather than each incremental match.
+    this.registerDomEvent(document, 'focusin', (evt) => this.onSearchFocus(evt), true);
+    this.registerDomEvent(document, 'focusout', (evt) => this.onSearchBlur(evt), true);
 
     // No default hotkeys: per Obsidian's plugin guidelines, leave them unbound
     // so users can assign their own (e.g. Mod+[ / Mod+]) without conflicts.
@@ -76,6 +94,7 @@ module.exports = class InFileNavHistory extends Plugin {
 
   onunload() {
     if (this._saveTimer) window.clearTimeout(this._saveTimer);
+    if (this._searchClearTimer) window.clearTimeout(this._searchClearTimer);
     this.saveData({ history: this.history });
   }
 
@@ -120,8 +139,51 @@ module.exports = class InFileNavHistory extends Plugin {
       this.pushEntry(stacks.back, prev);
       stacks.fwd.length = 0;
       this.scheduleSave();
+      // The pre-jump position is already recorded as `prev`; drop the anchor.
+      this.searchAnchor = null;
+    } else if (
+      this.searchAnchor &&
+      this.searchAnchor.leafId === leaf.id &&
+      this.searchAnchor.entry.path === entry.path &&
+      !sameEntry(this.searchAnchor.entry, entry)
+    ) {
+      // Same-file search jump (editor find, heading switcher, in-file search
+      // result): record where the search started, once per search session.
+      const stacks = this.stacksFor(leaf.id);
+      this.pushEntry(stacks.back, this.searchAnchor.entry);
+      stacks.fwd.length = 0;
+      this.scheduleSave();
+      this.searchAnchor = null;
     }
     this.snapshots[leaf.id] = entry;
+  }
+
+  onSearchFocus(evt) {
+    const el = evt.target;
+    if (!el || !el.closest || !el.closest(SEARCH_INPUT_SELECTOR)) return;
+    if (this._searchClearTimer) {
+      window.clearTimeout(this._searchClearTimer);
+      this._searchClearTimer = null;
+    }
+    const leaf = this.markdownLeaf();
+    if (!leaf) return;
+    const entry = this.entryForLeaf(leaf);
+    if (!entry) return;
+    // Anchor the editor's position before the search starts moving the cursor.
+    this.searchAnchor = { leafId: leaf.id, entry };
+  }
+
+  onSearchBlur(evt) {
+    const el = evt.target;
+    if (!el || !el.closest || !el.closest(SEARCH_INPUT_SELECTOR)) return;
+    // Keep the anchor briefly: a result click blurs the input before its
+    // position change registers in refresh(). After the grace window, drop it
+    // so an unrelated later cursor move isn't mistaken for a search jump.
+    if (this._searchClearTimer) window.clearTimeout(this._searchClearTimer);
+    this._searchClearTimer = window.setTimeout(() => {
+      this.searchAnchor = null;
+      this._searchClearTimer = null;
+    }, SEARCH_ANCHOR_GRACE_MS);
   }
 
   onNavClick(evt) {
@@ -167,6 +229,8 @@ module.exports = class InFileNavHistory extends Plugin {
     const target = from.pop();
     if (current) this.pushEntry(to, current);
 
+    // Our own restore must not be picked up as a search jump.
+    this.searchAnchor = null;
     this.navigating = true;
     try {
       if (current && current.path === target.path) {
